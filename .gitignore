@@ -9,3 +9,4 @@ haters/
 data/
 saved_models/
 temp/
+.venv/

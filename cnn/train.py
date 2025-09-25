@@ -1,93 +1,121 @@
 import os
-import sys
-import warnings
-import logging
-import time
-from datetime import date
+import torch
 import torchvision
-from torchvision.transforms import transforms
-import torch.optim
+from torchvision import transforms
+from torch.utils.data import DataLoader
 import torch.nn as nn
-from model import CNN
-sys.path.append('../')
-from utils.gen_utils import create_dir, get_accuracy
+import torch.optim as optim
+from model import CNN  
+from datetime import date
+import logging
 
-warnings.filterwarnings('ignore', category=UserWarning)
+# Defina o dispositivo (GPU ou CPU)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-root_dir = str(os.path.abspath(os.path.join(os.getcwd(), os.pardir)))
-epochs = 250
+
+# Defina os caminhos para as pastas de treinamento e teste
+root_dir = "C:/Users/sofia/OneDrive/Documentos/Github_projetos/hernanrazo/human-voice-detection"
+train_dir = os.path.join(root_dir, 'data/plots/train')
+test_dir = os.path.join(root_dir, 'data/plots/test')
+
+# Defina as transformações para as imagens
+transform = transforms.Compose([
+    transforms.Resize((32, 32)),  # Redimensione as imagens para 32x32
+    transforms.ToTensor(),         # Converta as imagens para tensores
+])
+
+# Carregue os conjuntos de dados
+train_data = torchvision.datasets.ImageFolder(root=train_dir, transform=transform)
+test_data = torchvision.datasets.ImageFolder(root=test_dir, transform=transform)
+
+# Crie os DataLoaders
 batch_size = 16
-lr = 0.01
-workers = 4
+train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+test_loader = DataLoader(test_data, batch_size=batch_size, shuffle=False)
 
-def main():
-    
-    # create new directory for the current training session
-    today = date.today()
-    today = str(today.strftime('%m-%d-%Y'))
-    dir_ = str(root_dir + '/saved_models/CNN/train-' + today)
-    create_dir(dir_)
+# Defina o modelo, a função de perda e o otimizador
+model = CNN().to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    log_file_name = 'CNN-' + today +'.log'
-    logging.basicConfig(filename=os.path.join(dir_, log_file_name),
-                        filemode='w',
-                        format='%(asctime)s: %(message)s',
-                        level=logging.INFO)
+# Função para calcular a acurácia
+def get_accuracy(preds, labels):
+    _, preds = torch.max(preds, dim=1)
+    return torch.tensor(torch.sum(preds == labels).item() / len(preds))
 
-    # set basic transforms. Spectrograms have to look a certain way so rotations,
-    # flips, and other
-    # transforms do not make sense in this application
-    transform = { 'train' : transforms.Compose([transforms.Resize([32, 32]),
-                                                transforms.ToTensor()])}
+# Cria diretório de salvamento com base na data
+today = date.today()
+today_str = today.strftime('%m-%d-%Y')
+model_dir = os.path.join(root_dir, 'cm', 'saved_models', 'CNN', f'train-{today_str}')
+os.makedirs(model_dir, exist_ok=True)
 
-    # get train dataset
-    train_data = torchvision.datasets.ImageFolder(root=root_dir + '/data/plots/train/', 
-                                                  transform=transform['train'])
-    
-    train_loader = torch.utils.data.DataLoader(dataset=train_data,
-                                               batch_size=batch_size,
-                                               shuffle=True,
-                                               num_workers=workers)
-    model = CNN()
-    model = model.to(device)
+# Configura o arquivo de log
+log_file_name = f'CnnTraining-{today_str}.log'
+logging.basicConfig(filename=os.path.join(model_dir, log_file_name),
+                    filemode='w',
+                    format='%(asctime)s: %(message)s',
+                    level=logging.INFO)
 
-    criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+# Treinamento
+epochs = 10
+best_val_loss = float('inf')  # Inicializa com uma perda muito alta
+for epoch in range(epochs):
+    model.train()
+    train_loss = 0
+    train_acc = 0
 
-    # for each epoch
-    for epoch in range(epochs):
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
 
-        model.train()
-        epoch_loss = 0
-        epoch_accuracy = 0
-        epoch_steps = 0
+        # Forward pass
+        outputs = model(images)
+        loss = criterion(outputs, labels)
 
-        for i, (img, label) in enumerate(train_loader):
-            img, label = img.to(device), label.to(device)
+        # Backward pass e otimização
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
-            prediction = model(img)
-            loss = criterion(prediction, label)
-            epoch_accuracy = get_accuracy(prediction, label)
+        # Calcule a perda e a acurácia
+        train_loss += loss.item()
+        train_acc += get_accuracy(outputs, labels)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+    # Média da perda e acurácia no conjunto de treinamento
+    train_loss /= len(train_loader)
+    train_acc /= len(train_loader)
 
-            epoch_loss += loss.item()
-            epoch_steps += 1
+    # Avaliação no conjunto de teste
+    model.eval()
+    test_loss = 0
+    test_acc = 0
 
-        # print status onto terminal and log file
-        print('Epoch: [%d/%d] | Loss: %.3f | Accuracy: %.3f' % (epoch+1,
-                                                                epochs,
-                                                                epoch_loss,
-                                                                epoch_accuracy))
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
 
-        logging.info('Epoch: [%d/%d] | Loss: %.3f | Accuracy: %.3f' % (epoch+1,
-                                                                       epochs,
-                                                                       epoch_loss,
-                                                                       epoch_accuracy))
-        # save model
-        model_file_name = 'CNN-' + today + '.pt'
-        torch.save(model.state_dict(), os.path.join(dir_, model_file_name))
-if __name__ == '__main__':
-    main()
+            # Forward pass
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            # Calcule a perda e a acurácia
+            test_loss += loss.item()
+            test_acc += get_accuracy(outputs, labels)
+
+        # Média da perda e acurácia no conjunto de teste
+        test_loss /= len(test_loader)
+        test_acc /= len(test_loader)
+
+    # Imprima os resultados
+    print(f"Epoch [{epoch+1}/{epochs}], "
+          f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+          f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
+
+    # Salve o modelo se ele tiver a melhor performance no conjunto de teste
+    if test_loss < best_val_loss:
+        best_val_loss = test_loss
+        model_file_name = 'CNN-best.pt'
+        torch.save(model.state_dict(), os.path.join(model_dir, model_file_name))
+
+    # Salve os resultados no log
+    logging.info(f"Epoch [{epoch+1}/{epochs}], "
+                 f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
+                 f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
